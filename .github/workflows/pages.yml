@@ -1,0 +1,43 @@
+name: Pages
+
+# Build shipwright from a stock Go toolchain and publish the static demos to
+# GitHub Pages. The offline demos (compile→link→run, and `go build`) run fully
+# in the visitor's browser. The network demo needs a server for /goproxy, which
+# static Pages hosting can't provide, so it is not wired up here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a newer push cancel an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Build the wasm tools and harvest std source
+        run: ./build.sh
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deploy
+        uses: actions/deploy-pages@v4

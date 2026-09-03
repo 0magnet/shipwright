@@ -46,7 +46,7 @@ window.addEventListener("error", function(e){ if(e.message && /already exited/.t
     const go=new Go();
     go.argv=argv;
     go.env={GOOS:"js",GOARCH:"wasm",GOROOT:"/goroot",GOPATH:"/gopath",HOME:"/root",TMPDIR:"/tmp",
-      PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:goproxy,GOSUMDB:"off",GONOSUMCHECK:"1",
+      PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:goproxy,GOSUMDB:"sum.golang.org",
       GOFLAGS:"-mod=mod",GOTOOLCHAIN:"local",GOCACHE:"/root/.cache/go-build",GO111MODULE:"on"};
     jsfs.mkdirp("/root/.cache/go-build");
     let code=0; go.exit=(c)=>{code=c;};

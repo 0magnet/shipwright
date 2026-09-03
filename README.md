@@ -16,6 +16,11 @@ again.
     → cmd/go spawns compile/asm/link as child wasm processes, ~90 of them,
       over one shared in-memory disk, and writes a 2.5 MB a.wasm
 
+**Live:** the offline demos run in your browser at
+<https://0magnet.github.io/shipwright/> (published by `.github/workflows/pages.yml`).
+The network demo needs a server for its `/goproxy` passthrough, so run that one
+locally.
+
 ## Run it
 
     ./build.sh                 # builds the wasm tools + harvests std source
@@ -24,8 +29,9 @@ again.
     #      http://127.0.0.1:8931/probe-gobuild.html — the real `go build`
     #      http://127.0.0.1:8931/probe-gonet.html   — `go build` of a fetched module
 
-`python3 -m http.server 8931` also serves the first two demos; the network
-demo needs `serve/main.go` because it must proxy `/goproxy` (see below).
+`serve/main.go` is the only server involved: static files plus the `/goproxy`
+passthrough the network demo needs (see below). It's a std-only Go program —
+the toolchain that builds shipwright is all it takes to run it.
 
 Headless proof (each marker line is a pass signal):
 
@@ -78,46 +84,56 @@ handful of js/wasm standard-library files with versions that call into bottle:
   tiny. This is the stock long-args mechanism, tuned to the wasm ceiling — no
   wasm_exec patch, no linker change.
 
-`stdsrc.sh` harvests the standard-library source closure the demo programs
-pull in (via `go list -deps`, js/wasm constraints applied) plus the
-assembler's `pkg/include` headers, keyed by their path under the tab's
-`/goroot`. The harness seeds those, the tools, and a `go.mod`+`main.go` into
-jsfs, then runs `go-proc.wasm`. `jsfs.js` and `proc.js` are vendored from
-bottle.
+`stdsrc.sh` harvests the standard-library source into `stdsrc.json`, keyed by
+path under the tab's `/goroot`, plus the assembler's `pkg/include` headers.
+Two modes: the default seeds just the closure the demo programs reach (~5.9 MB,
+via `go list -deps`); `./stdsrc.sh all` seeds the whole standard library
+(~97 MB) so *any* pure-Go program — or any module fetched over `/goproxy` —
+compiles, its imports guaranteed present. The harness seeds that, the tools,
+and a `go.mod`+`main.go` into jsfs, then runs `go-proc.wasm`. `jsfs.js` and
+`proc.js` are vendored from bottle.
 
 **The network path.** cmd/go's module downloads go through `net/http`, which
 on js/wasm is backed by the browser's Fetch API. A tab can't call
 proxy.golang.org directly — CORS forbids it — but it *can* call its own
 origin, so `serve/main.go` reverse-proxies `/goproxy/` to proxy.golang.org and
 the tab runs with `GOPROXY=<origin>/goproxy`. Same-origin fetch, no CORS, and
-cmd/go is none the wiser. `GOSUMDB=off` since the checksum database is a second
-egress the passthrough doesn't (yet) cover. On a host that already fronts a
-proxy — or over skywire's skysocks/dmsg for the serverless version — the same
-`GOPROXY` trick applies.
+cmd/go is none the wiser. The same server mirrors the checksum database at
+`/goproxy/sumdb/sum.golang.org/` (it answers `/supported` and forwards the
+rest to sum.golang.org), so the build runs with the stock `GOSUMDB` and every
+download is verified — the second egress, closed the same way as the first. On
+a host that already fronts a proxy — or over skywire's skysocks/dmsg for the
+serverless version — the same `GOPROXY` trick applies.
 
-## What works / what doesn't
+## What works
 
-Works: `go build` of a pure-Go program — compiling std from source,
-assembling, linking, running the result, all in the tab; **external module
-dependencies fetched from the network** over the `/goproxy` passthrough and
-compiled; the minimal compile→link→run demo; `go version` / `go env`.
+`go build` of any pure-Go program, in the tab: compiling the standard library
+from source, assembling, linking, and running the result. External module
+dependencies are **fetched from the network** over the `/goproxy` passthrough
+and **checksum-verified** through the mirrored sumdb. With `./stdsrc.sh all`
+the std closure is unbounded — anything pure-Go compiles. Also the minimal
+compile→link→run demo, and `go version` / `go env`.
 
-Doesn't, yet — the honest gap list:
+Cross-compiling pure Go to any GOOS/GOARCH from inside the tab should work
+as-is — the toolchain has always been a cross-compiler.
 
-1. **Wider std closure.** `stdsrc.sh` seeds the closure the demos need; a
-   program (or a fetched dependency) importing, say, `net/http` needs that
-   package's source seeded too. Seeding all of `$GOROOT/src` removes the limit
-   at the cost of a bigger bundle (cacheable in IndexedDB via jsfs.persist).
-2. **Checksum database.** Builds run with `GOSUMDB=off`; verifying downloads
-   against sum.golang.org is a second egress the passthrough could forward the
-   same way `/goproxy` does.
-3. **cgo**: never — it needs a C toolchain. Pure Go only. Cross-compiling
-   pure Go to any GOOS/GOARCH from inside the tab should work as-is: the
-   toolchain has always been a cross-compiler.
+Closed over this line of work: file locking, process spawning, a source
+GOROOT, network egress, and checksum verification — the toolchain fetches,
+verifies, compiles, and links, all in the tab.
 
-Gaps that used to be here and are now closed: file locking, process spawning,
-a source GOROOT, and network egress — the toolchain now fetches, compiles,
-and links, all in the tab.
+## The one real gap: cgo
+
+cgo needs a **C toolchain** — a C compiler and system headers — to build the C
+half of a cgo package, and a browser tab has none. So today it's pure Go only
+(and upstream has never supported cgo on `GOOS=js` regardless).
+
+Is it *impossible*? No — just a second toolchain's worth of work. clang has a
+wasm build, and a wasi-libc gives it headers and a C runtime; parked in jsfs
+and driven through the same `proc` layer that runs `compile`/`link`, with `CC`
+pointed at it, cgo's C steps could run exactly the way the Go ones do now. The
+hard parts are real (a wasm clang + linker that target wasm *and* run on it, a
+seeded sysroot, matching Go's cgo ABI), so it's a project, not a patch — but
+the same shape as everything already here, not a wall.
 
 ## Files
 
