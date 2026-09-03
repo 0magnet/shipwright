@@ -19,17 +19,21 @@ again.
 ## Run it
 
     ./build.sh                 # builds the wasm tools + harvests std source
-    python3 -m http.server 8931
+    go run ./serve/main.go     # :8931, serves the page + the /goproxy passthrough
     # open http://127.0.0.1:8931/            — edit a program, build & run
     #      http://127.0.0.1:8931/probe-gobuild.html — the real `go build`
+    #      http://127.0.0.1:8931/probe-gonet.html   — `go build` of a fetched module
 
-Headless proof (the marker line is the pass signal):
+`python3 -m http.server 8931` also serves the first two demos; the network
+demo needs `serve/main.go` because it must proxy `/goproxy` (see below).
+
+Headless proof (each marker line is a pass signal):
 
     chromium --headless --no-sandbox --virtual-time-budget=600000 \
-      --enable-logging=stderr http://127.0.0.1:8931/probe-gobuild.html \
-      2>&1 | grep SHIPWRIGHT-MARKER
+      --enable-logging=stderr http://127.0.0.1:8931/probe-gonet.html \
+      2>&1 | grep SHIPWRIGHT-NET-MARKER
 
-## Two demos
+## Three demos
 
 - **`index.html`** — the minimal shape: one `compile.wasm`, one `link.wasm`,
   a fixed set of prebuilt std archives. Source → `main.a` → `a.wasm` → runs.
@@ -40,6 +44,12 @@ Headless proof (the marker line is the pass signal):
   compiler, assembler and linker itself — as child wasm processes — compiling
   the standard library from the seeded source. No prebuilt archives; a real
   build, the way it runs on a disk.
+- **`probe-gonet.html`** — the same `go build`, but of a program that imports
+  an **external module** (`github.com/pkg/errors`). Its source is not seeded:
+  cmd/go fetches it from proxy.golang.org over the same-origin `/goproxy`
+  passthrough, extracts the zip into the module cache, and compiles it. This
+  is `go install pkg@version` territory — a dependency pulled from the network
+  and built, in the tab.
 
 ## How it works
 
@@ -68,50 +78,62 @@ handful of js/wasm standard-library files with versions that call into bottle:
   tiny. This is the stock long-args mechanism, tuned to the wasm ceiling — no
   wasm_exec patch, no linker change.
 
-`stdsrc.sh` harvests the standard-library source closure a fmt program pulls
-in (via `go list -deps`, js/wasm constraints applied) plus the assembler's
-`pkg/include` headers, keyed by their path under the tab's `/goroot`. The
-harness seeds those, the tools, and a `go.mod`+`main.go` into jsfs, then runs
-`go-proc.wasm`. `jsfs.js` and `proc.js` are vendored from bottle.
+`stdsrc.sh` harvests the standard-library source closure the demo programs
+pull in (via `go list -deps`, js/wasm constraints applied) plus the
+assembler's `pkg/include` headers, keyed by their path under the tab's
+`/goroot`. The harness seeds those, the tools, and a `go.mod`+`main.go` into
+jsfs, then runs `go-proc.wasm`. `jsfs.js` and `proc.js` are vendored from
+bottle.
+
+**The network path.** cmd/go's module downloads go through `net/http`, which
+on js/wasm is backed by the browser's Fetch API. A tab can't call
+proxy.golang.org directly — CORS forbids it — but it *can* call its own
+origin, so `serve/main.go` reverse-proxies `/goproxy/` to proxy.golang.org and
+the tab runs with `GOPROXY=<origin>/goproxy`. Same-origin fetch, no CORS, and
+cmd/go is none the wiser. `GOSUMDB=off` since the checksum database is a second
+egress the passthrough doesn't (yet) cover. On a host that already fronts a
+proxy — or over skywire's skysocks/dmsg for the serverless version — the same
+`GOPROXY` trick applies.
 
 ## What works / what doesn't
 
-Works: `go build` of any pure-Go program whose imports lie inside the seeded
-std source closure — compiling std from source, assembling, linking, and
-running the result, all in the tab; the minimal compile→link→run demo;
-`go version` / `go env`.
+Works: `go build` of a pure-Go program — compiling std from source,
+assembling, linking, running the result, all in the tab; **external module
+dependencies fetched from the network** over the `/goproxy` passthrough and
+compiled; the minimal compile→link→run demo; `go version` / `go env`.
 
 Doesn't, yet — the honest gap list:
 
-1. **Network.** `go install pkg@version` and building programs with
-   non-std dependencies need module downloads, i.e. GOPROXY egress. Browser
-   CORS blocks proxy.golang.org, so this wants either a same-origin
-   `/goproxy/*` passthrough (a few lines on any host server) or skywire's
-   skysocks/dmsg channels for the serverless version. Everything up to the
-   network boundary is done.
-2. **Wider std closure.** `stdsrc.sh` seeds the fmt/os/runtime closure; a
-   program importing, say, `net/http` needs that package's source seeded too.
-   Seeding all of `$GOROOT/src` removes the limit at the cost of a bigger
-   bundle (cacheable in IndexedDB via jsfs.persist).
+1. **Wider std closure.** `stdsrc.sh` seeds the closure the demos need; a
+   program (or a fetched dependency) importing, say, `net/http` needs that
+   package's source seeded too. Seeding all of `$GOROOT/src` removes the limit
+   at the cost of a bigger bundle (cacheable in IndexedDB via jsfs.persist).
+2. **Checksum database.** Builds run with `GOSUMDB=off`; verifying downloads
+   against sum.golang.org is a second egress the passthrough could forward the
+   same way `/goproxy` does.
 3. **cgo**: never — it needs a C toolchain. Pure Go only. Cross-compiling
    pure Go to any GOOS/GOARCH from inside the tab should work as-is: the
    toolchain has always been a cross-compiler.
 
 Gaps that used to be here and are now closed: file locking, process spawning,
-and a source GOROOT — the three things `go build` needs beyond a compiler.
+a source GOROOT, and network egress — the toolchain now fetches, compiles,
+and links, all in the tab.
 
 ## Files
 
     build.sh           rebuild everything from a stock Go install
     stdsrc.sh          harvest the std source closure (called by build.sh)
     harvest.sh         prebuilt std archives for index.html (called by build.sh)
+    serve/main.go      static server + the /goproxy module-proxy passthrough
     overlay/           the GOROOT overlay — 6 std files + generated overlay.json
     jsfs.js, proc.js   vendored from github.com/0magnet/bottle
     wasm_exec.js       copied from the stock Go install
     hello/main.go      the default program for index.html
+    netdemo/main.go    a program with an external dep, for probe-gonet.html
     index.html         compile → link → run
     driver.js          seed + compile + link + run, for index.html
     probe-gobuild.html the real cmd/go running `go build` in the tab
+    probe-gonet.html   `go build` of a module fetched over /goproxy
     probe-go.html      a minimal check that cmd/go boots (version / env)
     PROC-DESIGN.md     the process layer's design notes
 

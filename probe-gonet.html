@@ -1,0 +1,69 @@
+<!doctype html><meta charset="utf-8"><title>go build with a fetched module</title>
+<pre id="log" style="background:#0e0c14;color:#cdd2da;font:13px/1.5 monospace;padding:1em"></pre>
+<script src="jsfs.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="proc.js"></script>
+<script>
+window.addEventListener("error", function(e){ if(e.message && /already exited/.test(e.message)){ e.preventDefault(); } });
+(async function () {
+  const logEl = document.getElementById("log");
+  const log = (l) => { logEl.textContent += l + "\n"; try{console.log(l);}catch(_){} };
+  let buf="";
+  const sink=(b)=>{ buf+=new TextDecoder().decode(b); let i; while((i=buf.indexOf("\n"))>=0){ log("  | "+buf.slice(0,i)); buf=buf.slice(i+1);} };
+  jsfs.stdio.stdout=sink; jsfs.stdio.stderr=sink;
+  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u)).arrayBuffer());
+
+  jsfs.mkdirp("/goroot/pkg/tool/js_wasm");
+  jsfs.mkdirp("/gopath"); jsfs.mkdirp("/work"); jsfs.mkdirp("/root"); jsfs.mkdirp("/tmp");
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/compile", await fetchBytes("compile-proc.wasm"), 0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/link",    await fetchBytes("link-proc.wasm"),    0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/asm",     await fetchBytes("asm-proc.wasm"),     0o755);
+  jsfs.writeFile("/goroot/VERSION", "go1.27.0\n");
+
+  log("seeding std source (the in-tab GOROOT)…");
+  const std=await (await fetch("stdsrc.json")).json();
+  let nseed=0;
+  for(const path in std){ jsfs.writeFile(path, Uint8Array.from(atob(std[path]),c=>c.charCodeAt(0))); nseed++; }
+  log("seeded "+nseed+" std source files");
+
+  // A program that imports an EXTERNAL module. Its source is not seeded — the
+  // module cache is empty, so cmd/go must fetch github.com/pkg/errors over the
+  // /goproxy passthrough before it can compile it.
+  jsfs.writeFile("/work/go.mod", "module netdemo\n\ngo 1.27\n\nrequire github.com/pkg/errors v0.9.1\n");
+  jsfs.writeFile("/work/main.go",
+    'package main\n\nimport (\n\t"fmt"\n\n\t"github.com/pkg/errors"\n)\n\n' +
+    'func main(){ fmt.Printf("%v\\n", errors.Wrap(errors.New("root cause"), "wrapped")) }\n');
+
+  // GOPROXY points at THIS origin's /goproxy — a same-origin fetch, so the
+  // browser lets it through where a direct proxy.golang.org call is CORS-blocked.
+  const goproxy = location.origin + "/goproxy";
+  log("GOPROXY = " + goproxy + "  (same-origin passthrough → proxy.golang.org)");
+
+  const bytes=await fetchBytes("go-proc.wasm");
+  async function run(argv){
+    log("$ "+argv.join(" "));
+    jsfs.setCwd("/work");
+    const go=new Go();
+    go.argv=argv;
+    go.env={GOOS:"js",GOARCH:"wasm",GOROOT:"/goroot",GOPATH:"/gopath",HOME:"/root",TMPDIR:"/tmp",
+      PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:goproxy,GOSUMDB:"off",GONOSUMCHECK:"1",
+      GOFLAGS:"-mod=mod",GOTOOLCHAIN:"local",GOCACHE:"/root/.cache/go-build",GO111MODULE:"on"};
+    jsfs.mkdirp("/root/.cache/go-build");
+    let code=0; go.exit=(c)=>{code=c;};
+    const {instance}=await WebAssembly.instantiate(bytes, go.importObject);
+    const hung=new Promise(r=>setTimeout(()=>r("HUNG"),300000));
+    const r=await Promise.race([go.run(instance).then(()=>"done"),hung]);
+    log("("+(r==="HUNG"?"HUNG":"exit "+code)+")");
+    return r;
+  }
+
+  log("== go build (fetches github.com/pkg/errors over /goproxy, compiles, links) ==");
+  await run(["go","build","-o","/work/netdemo.wasm","."]);
+  const out=jsfs.readFile("/work/netdemo.wasm");
+  const fetched = jsfs.readFile("/gopath/pkg/mod/cache/download/github.com/pkg/errors/@v/v0.9.1.zip");
+  if(fetched && fetched.length>0){ log("fetched pkg/errors v0.9.1 zip into the module cache ("+fetched.length+" bytes)"); }
+  if(out&&out.length>0){ log("SHIPWRIGHT-NET-MARKER: go build with a network-fetched module produced /work/netdemo.wasm ("+out.length+" bytes)"); }
+  else{ log("BUILD-FAIL: no output binary"); }
+  log("== done ==");
+})();
+</script>

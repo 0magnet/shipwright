@@ -5,22 +5,28 @@
 # — cmd/go compiles fmt/os/runtime/… from source, exactly as it would on disk,
 # rather than reading prebuilt archives.
 #
-# The closure is whatever `go list -deps` of hello/ pulls in (js/wasm build
-# constraints applied, so only the files that GOOS=js GOARCH=wasm actually
-# compiles are seeded). asm also needs the compiler's include headers.
+# The closure is whatever `go list -deps` of the demo programs pulls in
+# (js/wasm build constraints applied, so only the files that GOOS=js
+# GOARCH=wasm actually compiles are seeded): hello/ for the fmt/os/runtime
+# base, and netdemo/ so the standard-library packages its external dependency
+# imports are present when cmd/go fetches and compiles it in the tab. asm also
+# needs the compiler's include headers. Only .Standard packages are seeded —
+# the external module itself is fetched at runtime over /goproxy, not seeded.
 set -eu
 cd "$(dirname "$0")"
 GOROOT=$(go env GOROOT)
 
 echo "shipwright: harvesting std source closure (this is the in-tab GOROOT)…"
 
-# host source paths: every .go/.s/.h of every std package in hello's build
-# closure, plus the pkg/include headers the assembler reads (textflag.h &c).
+# host source paths: every .go/.s/.h of every std package in the demos' build
+# closures, plus the pkg/include headers the assembler reads (textflag.h &c).
 {
-  ( cd hello && GOOS=js GOARCH=wasm go list -deps -json . ) | \
-    jq -r 'select(.Standard==true) | .Dir as $d
-           | ((.GoFiles // []) + (.SFiles // []) + (.HFiles // []))[]
-           | $d + "/" + .'
+  for m in hello netdemo; do
+    ( cd "$m" && GOOS=js GOARCH=wasm GOFLAGS=-mod=mod go list -deps -json . ) | \
+      jq -r 'select(.Standard==true) | .Dir as $d
+             | ((.GoFiles // []) + (.SFiles // []) + (.HFiles // []))[]
+             | $d + "/" + .'
+  done
   ls "$GOROOT"/pkg/include/*.h
 } | sort -u > .stdsrc.list
 
