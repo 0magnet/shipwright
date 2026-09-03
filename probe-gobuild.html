@@ -1,0 +1,62 @@
+<!doctype html><meta charset="utf-8"><title>go build in a tab</title>
+<pre id="log" style="background:#0e0c14;color:#cdd2da;font:13px/1.5 monospace;padding:1em"></pre>
+<script src="jsfs.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="proc.js"></script>
+<script>
+// A late timer callback from an exited child's Go runtime can surface as an
+// "already exited" error; proc.js swallows the resume, so drop the noise here.
+window.addEventListener("error", function(e){ if(e.message && /already exited/.test(e.message)){ e.preventDefault(); } });
+(async function () {
+  const logEl = document.getElementById("log");
+  const log = (l) => { logEl.textContent += l + "\n"; try{console.log(l);}catch(_){} };
+  let buf="";
+  const sink=(b)=>{ buf+=new TextDecoder().decode(b); let i; while((i=buf.indexOf("\n"))>=0){ log("  | "+buf.slice(0,i)); buf=buf.slice(i+1);} };
+  jsfs.stdio.stdout=sink; jsfs.stdio.stderr=sink;
+  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u)).arrayBuffer());
+
+  // The tab's GOROOT: the tools cmd/go execs (compile/link/asm) live under
+  // pkg/tool, and the whole std library source under src — cmd/go compiles it.
+  jsfs.mkdirp("/goroot/pkg/tool/js_wasm");
+  jsfs.mkdirp("/gopath"); jsfs.mkdirp("/work"); jsfs.mkdirp("/root"); jsfs.mkdirp("/tmp");
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/compile", await fetchBytes("compile-proc.wasm"), 0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/link",    await fetchBytes("link-proc.wasm"),    0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/asm",     await fetchBytes("asm-proc.wasm"),     0o755);
+  jsfs.writeFile("/goroot/VERSION", "go1.27.0\n"); // cmd/go checks this to accept GOROOT
+
+  log("seeding std source (the in-tab GOROOT)…");
+  const std=await (await fetch("stdsrc.json")).json();
+  let nseed=0;
+  for(const path in std){ jsfs.writeFile(path, Uint8Array.from(atob(std[path]),c=>c.charCodeAt(0))); nseed++; }
+  log("seeded "+nseed+" std source files");
+
+  // The program to build: an ordinary fmt hello-world in its own module.
+  jsfs.writeFile("/work/go.mod", "module probe\n\ngo 1.27\n");
+  jsfs.writeFile("/work/main.go", "package main\n\nimport \"fmt\"\n\nfunc main(){ fmt.Println(\"hi\") }\n");
+
+  const bytes=await fetchBytes("go-proc.wasm");
+  async function run(argv){
+    log("$ "+argv.join(" "));
+    jsfs.setCwd("/work");
+    const go=new Go();
+    go.argv=argv;
+    go.env={GOOS:"js",GOARCH:"wasm",GOROOT:"/goroot",GOPATH:"/gopath",HOME:"/root",TMPDIR:"/tmp",PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:"off",GOFLAGS:"-mod=mod",GOSUMDB:"off",GOTOOLCHAIN:"local",GOCACHE:"/root/.cache/go-build",GO111MODULE:"on"};
+    jsfs.mkdirp("/root/.cache/go-build");
+    let code=0; go.exit=(c)=>{code=c;};
+    const {instance}=await WebAssembly.instantiate(bytes, go.importObject);
+    const hung=new Promise(r=>setTimeout(()=>r("HUNG"),300000));
+    const r=await Promise.race([go.run(instance).then(()=>"done"),hung]);
+    log("("+(r==="HUNG"?"HUNG":"exit "+code)+")");
+    return r;
+  }
+
+  // The real cmd/go compiles the fmt/os/runtime closure from the seeded source
+  // and links it, spawning compile/asm/link as child wasm processes via proc.
+  log("== go build in the tab ==");
+  await run(["go","build","-o","/work/probe.wasm","."]);
+  const out=jsfs.readFile("/work/probe.wasm");
+  if(out&&out.length>0){ log("SHIPWRIGHT-MARKER: go build produced /work/probe.wasm ("+out.length+" bytes) in the tab"); }
+  else{ log("BUILD-FAIL: no output binary"); }
+  log("== done ==");
+})();
+</script>

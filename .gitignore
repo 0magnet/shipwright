@@ -3,7 +3,12 @@ bottle/
 chrome*.log
 probe*.log
 deps.err
+deps.txt
+manifest.json
 *.wasm
 pkg/
 importcfg
 importcfg.link
+stdsrc.json
+.stdsrc.list
+overlay/overlay.json

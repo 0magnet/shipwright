@@ -4,97 +4,116 @@ Ships in a [bottle](https://github.com/0magnet/bottle) need someone to
 build them. shipwright is that someone: the Go compiler, building Go
 programs, inside the browser tab they will run in.
 
-The real Go compiler and linker — `cmd/compile` and `cmd/link`, built for
-js/wasm with a stock Go toolchain, zero patches — running inside a browser
-tab against [bottle](https://github.com/0magnet/bottle)'s in-memory
-filesystem. A program is compiled, linked and executed entirely client-side:
-after the page's assets load, the server is never consulted again.
+The real Go toolchain — `cmd/go` driving `cmd/compile`, `cmd/asm` and
+`cmd/link`, built for js/wasm with a stock Go toolchain — running inside a
+browser tab against [bottle](https://github.com/0magnet/bottle)'s in-memory
+filesystem. An **unmodified `go build`** compiles the fmt/os/runtime closure
+from standard-library *source* and links a working wasm binary, entirely
+client-side: after the page's assets load, the server is never consulted
+again.
 
-    source → compile.wasm → main.a → link.wasm → a.wasm → runs, in the tab
+    $ go build -o /work/probe.wasm .      # in the tab
+    → cmd/go spawns compile/asm/link as child wasm processes, ~90 of them,
+      over one shared in-memory disk, and writes a 2.5 MB a.wasm
 
 ## Run it
 
-    ./build.sh                 # builds the wasm tools + harvests std archives
+    ./build.sh                 # builds the wasm tools + harvests std source
     python3 -m http.server 8931
-    # open http://127.0.0.1:8931/  — edit the program, press build & run
+    # open http://127.0.0.1:8931/            — edit a program, build & run
+    #      http://127.0.0.1:8931/probe-gobuild.html — the real `go build`
 
 Headless proof (the marker line is the pass signal):
 
-    chromium --headless --no-sandbox --virtual-time-budget=300000 \
-      --enable-logging=stderr --screenshot=/tmp/s.png http://127.0.0.1:8931/ \
+    chromium --headless --no-sandbox --virtual-time-budget=600000 \
+      --enable-logging=stderr http://127.0.0.1:8931/probe-gobuild.html \
       2>&1 | grep SHIPWRIGHT-MARKER
+
+## Two demos
+
+- **`index.html`** — the minimal shape: one `compile.wasm`, one `link.wasm`,
+  a fixed set of prebuilt std archives. Source → `main.a` → `a.wasm` → runs.
+  Three wasm processes, one jsfs. This is the toolchain with the orchestration
+  taken out — easiest to read.
+- **`probe-gobuild.html`** — the whole thing: the real **`cmd/go`** runs
+  `go build`. It reads a `go.mod`, computes the build graph, and execs the
+  compiler, assembler and linker itself — as child wasm processes — compiling
+  the standard library from the seeded source. No prebuilt archives; a real
+  build, the way it runs on a disk.
 
 ## How it works
 
-- `compile.wasm`, `link.wasm`, `go.wasm`: `GOOS=js GOARCH=wasm go build
-  cmd/compile` (and cmd/link, cmd/go). They compile unmodified — the Go
-  toolchain is pure Go and always has been.
-- `harvest.sh`: warms a js/wasm build of `hello/`, then uses
-  `go list -export -deps` to pull the 57 std package archives (fmt/os/runtime
-  closure, ~22 MB) out of the host build cache into `pkg/`, and writes the
-  `importcfg` / `importcfg.link` the tools will read in the tab.
-- `driver.js`: seeds bottle's jsfs with the archives, importcfgs and the
-  page's editable `main.go`; instantiates `compile.wasm` with
-  `argv = [compile -p main -pack -importcfg /importcfg -o /work/main.a
-  /src/main.go]` (wasm_exec passes argv/env); then `link.wasm`; then runs the
-  freshly linked `/work/a.wasm` as a third instance. Three processes, one
-  in-memory disk — exactly the shape bottle exists to provide.
-- Tool stdout/stderr land in the page log via `jsfs.stdio`.
+The toolchain is pure Go and cross-compiles, so `GOOS=js GOARCH=wasm go build
+cmd/compile` (and `cmd/link`, `cmd/asm`, `cmd/go`) just works — those are the
+`*.wasm` binaries. What a browser tab lacks is the *operating system* cmd/go
+orchestrates against: processes, pipes, a working GOROOT, file locks. bottle
+supplies the filesystem and network; a small **GOROOT overlay** (in
+`overlay/`, applied with `go build -overlay`) supplies the rest, replacing a
+handful of js/wasm standard-library files with versions that call into bottle:
 
-`probe-go.html` goes further: the real **`cmd/go` itself boots in the tab** —
-`go version` and `go env` run and exit 0. `go list` is where it stops today
-(see gaps).
+- **`syscall_js.go`** — `StartProcess`/`Wait4` over `globalThis.proc.spawn`:
+  a child process *is* another wasm instance sharing this tab's jsfs and vnet.
+  A child's stdio fds are pipe ends wired to proc's sinks; `Wait4` blocks on
+  the child's exit promise. `WaitStatus` carries the exit code.
+- **`fs_js.go` + `pipe_wasm.go`** — real `os.Pipe`, backed by jsfs pipe fds
+  (refcounted, so a fd retained for a child still delivers EOF on exit). This
+  is how compile's stdout reaches cmd/go's reader.
+- **`lp_wasm.go`** — a working `exec.LookPath` (the stock js/wasm one always
+  errors), so cmd/go finds the tools it parks under `$GOROOT/pkg/tool`.
+- **`filelock_other.go`** — no-op advisory locks; one tab is single-threaded,
+  so cmd/go's lockedfile layer has nothing to contend with.
+- **`args.go`** — lowers cmd/go's `ExecArgLengthLimit` so it writes long
+  compiler invocations to an `@response-file`. wasm_exec packs argv+env into
+  one 8 KB window and throws past it; the response file keeps the exec'd argv
+  tiny. This is the stock long-args mechanism, tuned to the wasm ceiling — no
+  wasm_exec patch, no linker change.
+
+`stdsrc.sh` harvests the standard-library source closure a fmt program pulls
+in (via `go list -deps`, js/wasm constraints applied) plus the assembler's
+`pkg/include` headers, keyed by their path under the tab's `/goroot`. The
+harness seeds those, the tools, and a `go.mod`+`main.go` into jsfs, then runs
+`go-proc.wasm`. `jsfs.js` and `proc.js` are vendored from bottle.
 
 ## What works / what doesn't
 
-Works: compile, link, run, any program whose imports lie inside the seeded
-archive set; editing and rebuilding without reload; `go version` / `go env`
-from the real cmd/go.
+Works: `go build` of any pure-Go program whose imports lie inside the seeded
+std source closure — compiling std from source, assembling, linking, and
+running the result, all in the tab; the minimal compile→link→run demo;
+`go version` / `go env`.
 
-Doesn't, yet — the honest gap list, in dependency order:
+Doesn't, yet — the honest gap list:
 
-1. **Processes — the first unlock (was misdiagnosed as locking).** Even
-   `go list ./...` hangs, and the hang is BEFORE any file op: cmd/go computes
-   a tool build ID by running `compile -V=full` (see
-   `cmd/go/internal/work/buildid.go` `toolID`), i.e. it exec()s the compiler,
-   and `syscall.StartProcess` on js/wasm is a two-line ENOSYS stub. The
-   process layer now exists as [bottle](https://github.com/0magnet/bottle)'s
-   `proc` (proc.js + a Go adapter), proven with a parent wasm spawning a
-   child, piping its stdin, and reading its stdout and exit code. What
-   remains for cmd/go is the GOROOT overlay in step 2.
-2. **The GOROOT overlay.** Replace the two stubs in `syscall/syscall_js.go` —
-   `StartProcess` and `Wait4` — with implementations over `proc.spawn`
-   (toolchain binaries parked in jsfs at `$GOROOT/pkg/tool/js_wasm/`), then
-   rebuild `go.wasm` against that patched GOROOT so unmodified cmd/go
-   orchestrates. The friction is the stdio contract: os/exec wires pipes as
-   OS fds via `ProcAttr.Files`, which bottle has no equivalent for, so the
-   overlay maps the child's fd 0/1/2 onto proc's per-process stdio and leaves
-   the rest unsupported. See PROC-DESIGN.md.
-3. **File locking.** Once cmd/go runs, its lockedfile layer wants flock-like
-   semantics; jsfs growing an advisory-lock table (or atomic
-   O_CREATE|O_EXCL with real EEXIST) removes the spin-wait its fallback does.
-4. **GOROOT std.** Full std *source* seeded into jsfs (tens of MB, cacheable via
-   jsfs.persist/IndexedDB) so cmd/go can compile std itself, or std archives
-   pre-seeded per-release as done here.
-5. **Network.** `go install pkg@version` needs GOPROXY egress. Browser CORS
-   blocks proxy.golang.org, so: a same-origin `/goproxy/*` passthrough
-   (five lines on any host server), or skywire's skysocks/dmsg channels for
-   the serverless version.
-6. **cgo**: never (needs a C toolchain); pure Go only. Cross-compiling pure
-   Go to any GOOS/GOARCH from inside the tab should work as-is once cmd/go
-   runs — the toolchain has always been a cross-compiler.
+1. **Network.** `go install pkg@version` and building programs with
+   non-std dependencies need module downloads, i.e. GOPROXY egress. Browser
+   CORS blocks proxy.golang.org, so this wants either a same-origin
+   `/goproxy/*` passthrough (a few lines on any host server) or skywire's
+   skysocks/dmsg channels for the serverless version. Everything up to the
+   network boundary is done.
+2. **Wider std closure.** `stdsrc.sh` seeds the fmt/os/runtime closure; a
+   program importing, say, `net/http` needs that package's source seeded too.
+   Seeding all of `$GOROOT/src` removes the limit at the cost of a bigger
+   bundle (cacheable in IndexedDB via jsfs.persist).
+3. **cgo**: never — it needs a C toolchain. Pure Go only. Cross-compiling
+   pure Go to any GOOS/GOARCH from inside the tab should work as-is: the
+   toolchain has always been a cross-compiler.
+
+Gaps that used to be here and are now closed: file locking, process spawning,
+and a source GOROOT — the three things `go build` needs beyond a compiler.
 
 ## Files
 
-    bottle/            the OS layer (cloned; jsfs.js is what's loaded here)
     build.sh           rebuild everything from a stock Go install
-    harvest.sh         std archive + importcfg harvest (called by build.sh)
-    compile.wasm       cmd/compile for js/wasm      (~51 MB)
-    link.wasm          cmd/link for js/wasm         (~12 MB)
-    go.wasm            cmd/go for js/wasm           (~30 MB)
-    pkg/               57 std package archives      (~22 MB)
-    importcfg[.link]   package path → archive maps
-    hello/main.go      the default program
-    index.html         the editable demo
-    driver.js          seed + compile + link + run
-    probe-go.html      how far the real cmd/go gets in-tab
+    stdsrc.sh          harvest the std source closure (called by build.sh)
+    harvest.sh         prebuilt std archives for index.html (called by build.sh)
+    overlay/           the GOROOT overlay — 6 std files + generated overlay.json
+    jsfs.js, proc.js   vendored from github.com/0magnet/bottle
+    wasm_exec.js       copied from the stock Go install
+    hello/main.go      the default program for index.html
+    index.html         compile → link → run
+    driver.js          seed + compile + link + run, for index.html
+    probe-gobuild.html the real cmd/go running `go build` in the tab
+    probe-go.html      a minimal check that cmd/go boots (version / env)
+    PROC-DESIGN.md     the process layer's design notes
+
+Built artifacts (`*.wasm`, `pkg/`, `stdsrc.json`, the importcfgs,
+`overlay/overlay.json`) are regenerated by `build.sh` and not committed.
