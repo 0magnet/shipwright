@@ -114,6 +114,15 @@ and **checksum-verified** through the mirrored sumdb. With `./stdsrc.sh all`
 the std closure is unbounded — anything pure-Go compiles. Also the minimal
 compile→link→run demo, and `go version` / `go env`.
 
+This scales to a real program: `probe-websh.html` runs
+`go install github.com/0magnet/websh/cmd/websh@main` in the tab (after
+`./stdsrc.sh all`), fetching websh's whole module graph — a dozen modules,
+including u-root's 52 MB zip — over `/goproxy`, verifying every checksum, and
+compiling ~150 packages into the same 13 MB `websh.wasm` a host build produces.
+(The proxy follows upstream redirects server-side; proxy.golang.org serves big
+zips as a 302 to a CDN on another origin, which the tab's fetch couldn't chase
+across origins.)
+
 Cross-compiling pure Go to any GOOS/GOARCH from inside the tab should work
 as-is — the toolchain has always been a cross-compiler.
 
@@ -150,6 +159,7 @@ the same shape as everything already here, not a wall.
     driver.js          seed + compile + link + run, for index.html
     probe-gobuild.html the real cmd/go running `go build` in the tab
     probe-gonet.html   `go build` of a module fetched over /goproxy
+    probe-websh.html   `go install` of github.com/0magnet/websh in the tab
     probe-go.html      a minimal check that cmd/go boots (version / env)
     PROC-DESIGN.md     the process layer's design notes
 

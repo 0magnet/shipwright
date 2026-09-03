@@ -1,0 +1,60 @@
+<!doctype html><meta charset="utf-8"><title>compile websh in a tab</title>
+<!-- Needs the full std library: run `./stdsrc.sh all` before serving. -->
+<pre id="log" style="background:#0e0c14;color:#cdd2da;font:13px/1.5 monospace;padding:1em"></pre>
+<script src="jsfs.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="proc.js"></script>
+<script>
+window.addEventListener("error", function(e){ if(e.message && /already exited/.test(e.message)){ e.preventDefault(); } });
+(async function () {
+  const logEl = document.getElementById("log");
+  const log = (l) => { logEl.textContent += l + "\n"; try{console.log(l);}catch(_){} };
+  let buf="";
+  const sink=(b)=>{ buf+=new TextDecoder().decode(b); let i; while((i=buf.indexOf("\n"))>=0){ log("  | "+buf.slice(0,i)); buf=buf.slice(i+1);} };
+  jsfs.stdio.stdout=sink; jsfs.stdio.stderr=sink;
+  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u)).arrayBuffer());
+
+  jsfs.mkdirp("/goroot/pkg/tool/js_wasm");
+  jsfs.mkdirp("/gopath/bin"); jsfs.mkdirp("/work"); jsfs.mkdirp("/root"); jsfs.mkdirp("/tmp");
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/compile", await fetchBytes("compile-proc.wasm"), 0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/link",    await fetchBytes("link-proc.wasm"),    0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/asm",     await fetchBytes("asm-proc.wasm"),     0o755);
+  jsfs.writeFile("/goroot/VERSION", "go1.27.0\n");
+
+  log("seeding the whole std library…");
+  const std=await (await fetch("stdsrc.json")).json();
+  let n=0; for(const p in std){ jsfs.writeFile(p, Uint8Array.from(atob(std[p]),c=>c.charCodeAt(0))); n++; }
+  log("seeded "+n+" std source files");
+
+  const goproxy = location.origin + "/goproxy";
+  log("GOPROXY = " + goproxy);
+
+  const bytes=await fetchBytes("go-proc.wasm");
+  async function run(argv){
+    log("$ "+argv.join(" "));
+    jsfs.setCwd("/work"); // outside a module, as `go install pkg@ver` requires
+    const go=new Go();
+    go.argv=argv;
+    go.env={GOOS:"js",GOARCH:"wasm",GOROOT:"/goroot",GOPATH:"/gopath",GOBIN:"/work",HOME:"/root",TMPDIR:"/tmp",
+      PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:goproxy,GOSUMDB:"sum.golang.org",
+      GOFLAGS:"-mod=mod",GOTOOLCHAIN:"local",GOCACHE:"/root/.cache/go-build",GO111MODULE:"on"};
+    jsfs.mkdirp("/root/.cache/go-build");
+    let code=0; go.exit=(c)=>{code=c;};
+    const {instance}=await WebAssembly.instantiate(bytes, go.importObject);
+    const hung=new Promise(r=>setTimeout(()=>r("HUNG"),540000));
+    const r=await Promise.race([go.run(instance).then(()=>"done"),hung]);
+    log("("+(r==="HUNG"?"HUNG":"exit "+code)+")");
+    return r;
+  }
+
+  // The real test: fetch websh and its whole module graph over /goproxy and
+  // compile it — one of the user's own wasm tools, built by the toolchain in
+  // the tab.
+  log("== go install github.com/0magnet/websh/cmd/websh@main ==");
+  await run(["go","install","github.com/0magnet/websh/cmd/websh@main"]);
+  const out=jsfs.readFile("/work/websh");
+  if(out&&out.length>0){ log("SHIPWRIGHT-WEBSH-MARKER: compiled websh in the tab ("+out.length+" bytes)"); }
+  else{ log("WEBSH-FAIL: no binary at /work/websh"); }
+  log("== done ==");
+})();
+</script>
