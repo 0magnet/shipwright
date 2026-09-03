@@ -53,24 +53,34 @@ from the real cmd/go.
 
 Doesn't, yet — the honest gap list, in dependency order:
 
-1. **File locking.** `go list`/`go build` livelock: cmd/go's lockedfile
-   layer needs flock-like semantics jsfs doesn't provide, and its fallback
-   spin-waits. jsfs growing an advisory-lock table (or honoring
-   O_CREATE|O_EXCL atomically with real EEXIST, which it may only partly do)
-   is the first unlock.
-2. **Processes.** `go build` orchestrates by exec()ing compile/link. The fix
-   is a bottle `proc` layer: `syscall.StartProcess` under js/wasm →
-   instantiate another wasm module (the toolchain binaries parked in jsfs at
-   `$GOROOT/pkg/tool/js_wasm/`) sharing the same jsfs/vnet, wait = the
-   instance's exit promise. See PROC-DESIGN.md.
-3. **GOROOT.** Full std *source* seeded into jsfs (tens of MB, cacheable via
+1. **Processes — the first unlock (was misdiagnosed as locking).** Even
+   `go list ./...` hangs, and the hang is BEFORE any file op: cmd/go computes
+   a tool build ID by running `compile -V=full` (see
+   `cmd/go/internal/work/buildid.go` `toolID`), i.e. it exec()s the compiler,
+   and `syscall.StartProcess` on js/wasm is a two-line ENOSYS stub. The
+   process layer now exists as [bottle](https://github.com/0magnet/bottle)'s
+   `proc` (proc.js + a Go adapter), proven with a parent wasm spawning a
+   child, piping its stdin, and reading its stdout and exit code. What
+   remains for cmd/go is the GOROOT overlay in step 2.
+2. **The GOROOT overlay.** Replace the two stubs in `syscall/syscall_js.go` —
+   `StartProcess` and `Wait4` — with implementations over `proc.spawn`
+   (toolchain binaries parked in jsfs at `$GOROOT/pkg/tool/js_wasm/`), then
+   rebuild `go.wasm` against that patched GOROOT so unmodified cmd/go
+   orchestrates. The friction is the stdio contract: os/exec wires pipes as
+   OS fds via `ProcAttr.Files`, which bottle has no equivalent for, so the
+   overlay maps the child's fd 0/1/2 onto proc's per-process stdio and leaves
+   the rest unsupported. See PROC-DESIGN.md.
+3. **File locking.** Once cmd/go runs, its lockedfile layer wants flock-like
+   semantics; jsfs growing an advisory-lock table (or atomic
+   O_CREATE|O_EXCL with real EEXIST) removes the spin-wait its fallback does.
+4. **GOROOT std.** Full std *source* seeded into jsfs (tens of MB, cacheable via
    jsfs.persist/IndexedDB) so cmd/go can compile std itself, or std archives
    pre-seeded per-release as done here.
-4. **Network.** `go install pkg@version` needs GOPROXY egress. Browser CORS
+5. **Network.** `go install pkg@version` needs GOPROXY egress. Browser CORS
    blocks proxy.golang.org, so: a same-origin `/goproxy/*` passthrough
    (five lines on any host server), or skywire's skysocks/dmsg channels for
    the serverless version.
-5. **cgo**: never (needs a C toolchain); pure Go only. Cross-compiling pure
+6. **cgo**: never (needs a C toolchain); pure Go only. Cross-compiling pure
    Go to any GOOS/GOARCH from inside the tab should work as-is once cmd/go
    runs — the toolchain has always been a cross-compiler.
 

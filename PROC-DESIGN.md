@@ -43,3 +43,20 @@ Page global `proc` (proc.js), plus a Go adapter mirroring vnet's:
 3. GOROOT overlay patch for syscall StartProcess/Wait4; rebuild go.wasm;
    `go build ./...` in-tab against seeded std archives.
 4. `/goproxy` passthrough (or skysocks channel) → `go install pkg@ver`.
+
+## Status (updated)
+
+Steps reordered by what the empirical probe showed: `go list` hangs on the
+toolID `compile -V=full` exec, before any file lock — so **proc is the first
+unlock, not file-locking.**
+
+- **Done.** proc.js + the `bottle/proc` Go adapter, shipped in
+  [bottle](https://github.com/0magnet/bottle) (`example/proc`). A parent wasm
+  spawns a child sharing the page fs, pipes stdin, and reads its stdout and
+  exit code. This is step 2 of the original order, standing on its own.
+- **Next.** The GOROOT overlay: patch `syscall.StartProcess`/`Wait4`
+  (two ENOSYS stubs in `syscall/syscall_js.go`) to call `proc.spawn`, map
+  the child's fd 0/1/2 onto proc's per-process stdio, rebuild `go.wasm`. Then
+  `go list`/`go build` orchestrate the compiler and linker that already run
+  in the tab today.
+- **After.** jsfs advisory locks; `/goproxy` passthrough for `go install`.
