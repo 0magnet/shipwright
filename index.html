@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>gotab — the Go toolchain in a browser tab</title>
+<style>
+body{background:#0e0c14;color:#cdd2da;font:13px/1.5 ui-monospace,monospace;margin:2em}
+h1{font-size:16px;color:#9d7cff} pre{white-space:pre-wrap;word-break:break-all}
+</style>
+<h1>gotab — cmd/compile + cmd/link running in this tab, on bottle's jsfs</h1>
+<p>The real Go compiler and linker, built for js/wasm, run below against an
+in-memory filesystem. Edit the program and rebuild — nothing after page load
+touches the server. Imports are limited to the packages seeded from the
+manifest (the fmt/os/runtime closure).</p>
+<textarea id="src" spellcheck="false" style="width:100%;height:12em;background:#15131c;color:#cdd2da;border:1px solid #2a2342;font:13px ui-monospace,monospace;padding:.6em"></textarea>
+<p><button id="build" style="background:#2a2342;color:#cdd2da;border:1px solid #3a3352;padding:.4em 1em;font:inherit;cursor:pointer">build &amp; run</button></p>
+<pre id="log"></pre>
+<script src="jsfs.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="driver.js"></script>

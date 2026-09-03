@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>gotab probe — cmd/go itself, in the tab</title>
+<pre id="log" style="background:#0e0c14;color:#cdd2da;font:13px monospace;padding:1em"></pre>
+<script src="jsfs.js"></script>
+<script src="wasm_exec.js"></script>
+<script>
+(async function () {
+  const logEl = document.getElementById("log");
+  const log = (l) => { logEl.textContent += l + "\n"; try { console.log(l); } catch (_) {} };
+  let buf = "";
+  const sink = (b) => {
+    buf += new TextDecoder().decode(b);
+    let i; while ((i = buf.indexOf("\n")) >= 0) { log("  | " + buf.slice(0, i)); buf = buf.slice(i + 1); }
+  };
+  jsfs.stdio.stdout = sink; jsfs.stdio.stderr = sink;
+  jsfs.mkdirp("/goroot/bin"); jsfs.mkdirp("/goroot/pkg/tool/js_wasm"); jsfs.mkdirp("/gopath"); jsfs.mkdirp("/work/mod");
+  jsfs.writeFile("/work/mod/go.mod", "module probe\n\ngo 1.27\n");
+  jsfs.writeFile("/work/mod/main.go", "package main\nfunc main(){}\n");
+  const bytes = new Uint8Array(await (await fetch("go.wasm")).arrayBuffer());
+  async function run(argv, dir) {
+    log("-> " + argv.join(" "));
+    if (dir) jsfs.setCwd(dir);
+    const go = new Go();
+    go.argv = argv;
+    go.env = { GOOS: "js", GOARCH: "wasm", GOROOT: "/goroot", GOPATH: "/gopath", HOME: "/root", TMPDIR: "/tmp", GOPROXY: "off", GOFLAGS: "-mod=mod", GONOSUMDB: "*", GONOSUMCHECK: "1", GOSUMDB: "off", PATH: "/bin" };
+    let code = 0; go.exit = (c) => { code = c; };
+    const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+    const hung = new Promise((res) => setTimeout(() => res("HUNG"), 8000));
+    const done = go.run(instance).then(() => "done");
+    const r = await Promise.race([done, hung]);
+    log("(" + (r === "HUNG" ? "HUNG after 8s" : "exit " + code) + ")  " + argv.join(" "));
+  }
+  log("== probing the real cmd/go inside the tab ==");
+  for (const step of [
+    [["go", "version"]],
+    [["go", "env", "GOOS", "GOARCH", "GOROOT"]],
+    [["go", "list", "./..."], "/work/mod"],
+    [["go", "build", "-n", "."], "/work/mod"],
+  ]) {
+    try { await run(step[0], step[1]); } catch (e) { log("STEP ERROR: " + (e && (e.stack || e.message || e))); }
+  }
+  log("== probe complete ==");
+})();
+</script>
