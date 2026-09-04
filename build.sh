@@ -40,11 +40,13 @@ cat > overlay/overlay.json <<EOF
 }
 EOF
 
-echo "shipwright: building the overlay tools (go/compile/link/asm -proc.wasm)…"
+echo "shipwright: building the overlay tools (go/compile/link/asm/vet -proc.wasm)…"
 GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o go-proc.wasm      cmd/go
 GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o compile-proc.wasm cmd/compile
 GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o link-proc.wasm    cmd/link
 GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o asm-proc.wasm     cmd/asm
+# vet too, so the in-tab cmd/go can run `go test` (which invokes vet).
+GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o vet-proc.wasm     cmd/vet
 
 # --- std source for the in-tab cmd/go ---------------------------------------
 ./stdsrc.sh
