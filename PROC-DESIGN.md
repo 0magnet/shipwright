@@ -2,7 +2,7 @@
 
 The missing third leg. bottle fakes the filesystem (jsfs) and the network
 (vnet); cmd/go — and every Unix-shaped orchestrator — also needs fork/exec.
-A tab has an exact analogue: instantiating another wasm module IS spawning a
+A tab has an exact analog: instantiating another wasm module IS spawning a
 process. websh already demonstrates the degenerate case by hand.
 
 ## Shape
