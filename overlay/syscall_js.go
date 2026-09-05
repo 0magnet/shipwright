@@ -361,6 +361,40 @@ var (
 	procNext  = 100
 )
 
+// offThreadTools are the toolchain programs that are pure computation: they
+// read and write files through jsfs and never touch the network. Those can run
+// in a Worker, where a long compile no longer blocks the page.
+//
+// The list is a whitelist rather than a default because a worker child has this
+// tab's filesystem but NOT its vnet: it reaches jsfs over a blocking channel,
+// while the page-global port table stays on the page thread. cmd/go itself
+// fetches modules, so it must keep running there. Its stdin also reads EOF off
+// thread, which these three never use.
+var offThreadTools = map[string]bool{"compile": true, "link": true, "asm": true}
+
+// offThread reports whether this child should run in a Worker: an eligible
+// tool, on a page that loaded fsbridge.js and is cross-origin isolated. Where
+// any of that is missing the child runs on the page thread instead — same
+// result, same output, only a busy main thread.
+//
+// basename is open-coded: syscall sits below strings in the dependency graph.
+func offThread(proc js.Value, argv0 string) bool {
+	base := argv0
+	for i := len(base) - 1; i >= 0; i-- {
+		if base[i] == '/' {
+			base = base[i+1:]
+			break
+		}
+	}
+	if !offThreadTools[base] {
+		return false
+	}
+	if !proc.Get("spawnWorker").Truthy() || !js.Global().Get("fsbridge").Truthy() {
+		return false
+	}
+	return js.Global().Get("crossOriginIsolated").Truthy()
+}
+
 func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle uintptr, err error) {
 	proc := js.Global().Get("proc")
 	if !proc.Truthy() {
@@ -415,7 +449,11 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 		}
 	}
 
-	res := proc.Call("spawn", opts)
+	method := "spawn"
+	if offThread(proc, argv0) {
+		method = "spawnWorker"
+	}
+	res := proc.Call(method, opts)
 	procMu.Lock()
 	pid = procNext
 	procNext++

@@ -62,5 +62,7 @@ echo "shipwright: ready — go run ./serve/main.go and open http://127.0.0.1:893
 echo "  index.html         compile → link → run a program in the tab"
 echo "  probe-gobuild.html the real cmd/go running 'go build' in the tab"
 echo "  probe-gonet.html   'go build' of a module fetched over /goproxy"
-# jsfs.js and proc.js are vendored from github.com/0magnet/bottle; refresh with:
-#   git clone git@github.com:0magnet/bottle.git && cp bottle/jsfs.js bottle/proc.js .
+# jsfs.js, fsbridge.js and proc.js are vendored from github.com/0magnet/bottle;
+# refresh with:
+#   git clone git@github.com:0magnet/bottle.git && \
+#     cp bottle/jsfs.js bottle/fsbridge.js bottle/proc.js .
