@@ -1,0 +1,118 @@
+<!doctype html><meta charset="utf-8"><title>go build parallelism</title>
+<pre id="log" style="background:#0e0c14;color:#cdd2da;font:13px/1.5 monospace;padding:1em"></pre>
+<script>
+// Cross-origin isolation, without a server that can set headers. SharedArrayBuffer
+// — and so fsbridge, and so compiles that do not freeze the tab — is only granted
+// to a cross-origin-isolated page, and GitHub Pages cannot send COOP/COEP. coi-sw.js
+// adds them to its own responses; this reloads once, after the worker takes control,
+// because the FIRST navigation came from Pages without them. Guarded so a browser
+// where it cannot work reloads once and then stops.
+(function () {
+  if (window.crossOriginIsolated || !('serviceWorker' in navigator)) return;
+  var KEY = 'coi-sw-reloaded';
+  navigator.serviceWorker.register('coi-sw.js', { scope: './' }).then(function () {
+    if (navigator.serviceWorker.controller) return; // already tried and still not isolated
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (sessionStorage.getItem(KEY)) return;
+      try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
+      location.reload();
+    });
+  }).catch(function () {});
+})();
+</script>
+<script src="jsfs.js"></script>
+<script src="fsbridge.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="proc.js"></script>
+<script>
+// A late timer callback from an exited child's Go runtime can surface as an
+// "already exited" error; proc.js swallows the resume, so drop the noise here.
+window.addEventListener("error", function(e){ if(e.message && /already exited/.test(e.message)){ e.preventDefault(); } });
+(async function () {
+  const logEl = document.getElementById("log");
+  const log = (l) => { logEl.textContent += l + "\n"; try{console.log(l);}catch(_){} };
+  let buf="";
+  const sink=(b)=>{ buf+=new TextDecoder().decode(b); let i; while((i=buf.indexOf("\n"))>=0){ log("  | "+buf.slice(0,i)); buf=buf.slice(i+1);} };
+  jsfs.stdio.stdout=sink; jsfs.stdio.stderr=sink;
+  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u)).arrayBuffer());
+
+  // The tab's GOROOT: the tools cmd/go execs (compile/link/asm) live under
+  // pkg/tool, and the whole std library source under src — cmd/go compiles it.
+  jsfs.mkdirp("/goroot/pkg/tool/js_wasm");
+  jsfs.mkdirp("/gopath"); jsfs.mkdirp("/work"); jsfs.mkdirp("/root"); jsfs.mkdirp("/tmp");
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/compile", await fetchBytes("compile-proc.wasm"), 0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/link",    await fetchBytes("link-proc.wasm"),    0o755);
+  jsfs.writeFile("/goroot/pkg/tool/js_wasm/asm",     await fetchBytes("asm-proc.wasm"),     0o755);
+  jsfs.writeFile("/goroot/VERSION", "go1.27.0\n"); // cmd/go checks this to accept GOROOT
+
+  log("seeding std source (the in-tab GOROOT)…");
+  const std=await (await fetch("stdsrc.json")).json();
+  let nseed=0;
+  for(const path in std){ jsfs.writeFile(path, Uint8Array.from(atob(std[path]),c=>c.charCodeAt(0))); nseed++; }
+  log("seeded "+nseed+" std source files");
+
+  // The program to build: an ordinary fmt hello-world in its own module.
+  jsfs.writeFile("/work/go.mod", "module probe\n\ngo 1.27\n");
+  jsfs.writeFile("/work/main.go", "package main\n\nimport \"fmt\"\n\nfunc main(){ fmt.Println(\"hi\") }\n");
+
+  const bytes=await fetchBytes("go-proc.wasm");
+  async function run(argv, cache){
+    log("$ "+argv.join(" "));
+    jsfs.setCwd("/work");
+    const go=new Go();
+    go.argv=argv;
+    go.env={GOOS:"js",GOARCH:"wasm",GOROOT:"/goroot",GOPATH:"/gopath",HOME:"/root",TMPDIR:"/tmp",PATH:"/goroot/pkg/tool/js_wasm",GOPROXY:"off",GOFLAGS:"-mod=mod",GOSUMDB:"off",GOTOOLCHAIN:"local",GOCACHE:cache,GO111MODULE:"on"};
+    jsfs.mkdirp(cache);
+    let code=0; go.exit=(c)=>{code=c;};
+    const {instance}=await WebAssembly.instantiate(bytes, go.importObject);
+    const hung=new Promise(r=>setTimeout(()=>r("HUNG"),300000));
+    const r=await Promise.race([go.run(instance).then(()=>"done"),hung]);
+    log("("+(r==="HUNG"?"HUNG":"exit "+code)+")");
+    return r;
+  }
+
+  // Compiles run in Workers now, so several COULD run at once. Whether they do
+  // is a cmd/go question: it takes its default -p from runtime.NumCPU(), and on
+  // js/wasm that is 1 — which would leave the build serial no matter how many
+  // workers are available. Force -p and watch the peak number in flight.
+  //
+  // Each run gets its own GOCACHE, or the second build is a cache hit measuring
+  // nothing.
+  function meter(){
+    let inflight=0,max=0,total=0,onthread=0;
+    const rawW=proc.spawnWorker, rawS=proc.spawn;
+    proc.spawnWorker=function(){
+      inflight++; total++; if(inflight>max) max=inflight;
+      const c=rawW.apply(proc,arguments);
+      c.exited.then(function(){ inflight--; });
+      return c;
+    };
+    proc.spawn=function(){ onthread++; return rawS.apply(proc,arguments); };
+    return { stop:function(){ proc.spawnWorker=rawW; proc.spawn=rawS; return {max:max,total:total,onthread:onthread}; } };
+  }
+
+  async function measure(label,p){
+    const m=meter();
+    const t0=performance.now();
+    const argv=["go","build","-p",String(p),"-o","/work/out-"+label+".wasm","."];
+    await run(argv,"/root/.cache/gc-"+label);
+    const ms=performance.now()-t0;
+    const st=m.stop();
+    const out=jsfs.readFile("/work/out-"+label+".wasm");
+    log("  "+label+": "+(ms/1000).toFixed(1)+"s  peak-concurrent="+st.max+
+        "  children="+st.total+"  on-thread="+st.onthread+
+        "  out="+(out?out.length:0)+"B");
+    return {ms:ms,max:st.max,total:st.total,ok:!!(out&&out.length)};
+  }
+
+  log("== parallelism: does -p actually overlap the workers? ==");
+  const r1=await measure("p1",1);
+  const r4=await measure("p4",4);
+  log("");
+  log("peak concurrent workers:  -p1="+r1.max+"   -p4="+r4.max);
+  log("wall time:                -p1="+(r1.ms/1000).toFixed(1)+"s   -p4="+(r4.ms/1000).toFixed(1)+"s");
+  if(r4.max>r1.max){ log("PARALLEL-RESULT: OVERLAPS ("+(r1.ms/r4.ms).toFixed(2)+"x speedup at -p4)"); }
+  else { log("PARALLEL-RESULT: SERIAL — -p4 did not overlap (peak stayed "+r4.max+")"); }
+  log("== done ==");
+})();
+</script>

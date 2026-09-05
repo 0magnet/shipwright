@@ -370,7 +370,7 @@ var (
 // while the page-global port table stays on the page thread. cmd/go itself
 // fetches modules, so it must keep running there. Its stdin also reads EOF off
 // thread, which these three never use.
-var offThreadTools = map[string]bool{"compile": true, "link": true, "asm": true}
+var offThreadTools = map[string]bool{"compile": true, "link": true, "asm": true, "vet": true}
 
 // offThread reports whether this child should run in a Worker: an eligible
 // tool, on a page that loaded fsbridge.js and is cross-origin isolated. Where
