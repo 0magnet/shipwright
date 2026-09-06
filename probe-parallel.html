@@ -34,7 +34,13 @@ window.addEventListener("error", function(e){ if(e.message && /already exited/.t
   let buf="";
   const sink=(b)=>{ buf+=new TextDecoder().decode(b); let i; while((i=buf.indexOf("\n"))>=0){ log("  | "+buf.slice(0,i)); buf=buf.slice(i+1);} };
   jsfs.stdio.stdout=sink; jsfs.stdio.stderr=sink;
-  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u)).arrayBuffer());
+  // cache:"reload" is not paranoia. The toolchain wasm is served with no
+  // Cache-Control, so the browser gives it a heuristic freshness lifetime
+  // derived from its age — and a freshly rebuilt go-proc.wasm was then still
+  // answered from cache without revalidating. That is a measurement reporting
+  // the OLD toolchain's behavior with none of the usual symptoms of staleness:
+  // it costs an afternoon exactly once.
+  const fetchBytes=async(u)=>new Uint8Array(await (await fetch(u,{cache:"reload"})).arrayBuffer());
 
   // The tab's GOROOT: the tools cmd/go execs (compile/link/asm) live under
   // pkg/tool, and the whole std library source under src — cmd/go compiles it.
@@ -72,9 +78,13 @@ window.addEventListener("error", function(e){ if(e.message && /already exited/.t
   }
 
   // Compiles run in Workers now, so several COULD run at once. Whether they do
-  // is a cmd/go question: it takes its default -p from runtime.NumCPU(), and on
-  // js/wasm that is 1 — which would leave the build serial no matter how many
-  // workers are available. Force -p and watch the peak number in flight.
+  // is a cmd/go question: it takes its default -p from runtime.GOMAXPROCS(0),
+  // and on js/wasm that is 1 — which would leave the build serial no matter how
+  // many workers are available. The overlay's cmd/go/internal/cfg/buildp_js.go
+  // now sets that default from navigator.hardwareConcurrency instead, so this
+  // probe sweeps explicit -p values AND runs one build with no -p at all, which
+  // is the case that has to come out parallel for the change to be worth
+  // anything.
   //
   // Each run gets its own GOCACHE, or the second build is a cache hit measuring
   // nothing.
@@ -91,28 +101,60 @@ window.addEventListener("error", function(e){ if(e.message && /already exited/.t
     return { stop:function(){ proc.spawnWorker=rawW; proc.spawn=rawS; return {max:max,total:total,onthread:onthread}; } };
   }
 
+  // A cheap content check on the output. The point of a parallelism change is
+  // that it changes only the schedule, so every run must produce byte-identical
+  // bytes; comparing lengths alone would miss a genuinely miscompiled binary.
+  function fnv(b){ let h=0x811c9dc5>>>0; for(let i=0;i<b.length;i++){ h^=b[i]; h=Math.imul(h,0x01000193)>>>0; } return h.toString(16); }
+
   async function measure(label,p){
     const m=meter();
+    // Timers in a HIDDEN tab are throttled to about one callback a minute, so
+    // anything measured there is fiction. Record the state rather than trusting
+    // the operator to keep the tab in front.
+    const vis0=document.visibilityState;
     const t0=performance.now();
-    const argv=["go","build","-p",String(p),"-o","/work/out-"+label+".wasm","."];
+    const argv=["go","build"];
+    if(p!==null) argv.push("-p",String(p));
+    argv.push("-o","/work/out-"+label+".wasm",".");
     await run(argv,"/root/.cache/gc-"+label);
     const ms=performance.now()-t0;
     const st=m.stop();
     const out=jsfs.readFile("/work/out-"+label+".wasm");
+    const vis=(vis0==="visible"&&document.visibilityState==="visible")?"visible":"HIDDEN(discard)";
     log("  "+label+": "+(ms/1000).toFixed(1)+"s  peak-concurrent="+st.max+
         "  children="+st.total+"  on-thread="+st.onthread+
-        "  out="+(out?out.length:0)+"B");
-    return {ms:ms,max:st.max,total:st.total,ok:!!(out&&out.length)};
+        "  out="+(out?out.length:0)+"B/"+(out?fnv(out):"-")+"  tab="+vis);
+    return {label:label,p:p,ms:ms,max:st.max,total:st.total,onthread:st.onthread,
+            bytes:out?out.length:0,hash:out?fnv(out):"",visible:vis==="visible"};
   }
 
-  log("== parallelism: does -p actually overlap the workers? ==");
-  const r1=await measure("p1",1);
-  const r4=await measure("p4",4);
+  // ?p=def,1,2,4 — "def" means no -p at all, i.e. whatever cmd/go defaults to,
+  // which is the run that matters. 8 is deliberately not in the default plan:
+  // it hung the page thread outright on two of three attempts here, and a probe
+  // whose default invocation can wedge the tab is not one anyone will run.
+  const q=new URLSearchParams(location.search);
+  const plan=(q.get("p")||"def,1,2,4").split(",").map(s=>s.trim()).filter(Boolean);
+
+  log("== parallelism: does the default -p overlap the workers? ==");
+  log("crossOriginIsolated="+!!window.crossOriginIsolated+
+      "  navigator.hardwareConcurrency="+navigator.hardwareConcurrency+
+      "  deviceMemory="+(navigator.deviceMemory||"?"));
+  const results=[];
+  for(const s of plan){
+    results.push(await measure(s, s==="def"?null:parseInt(s,10)));
+  }
   log("");
-  log("peak concurrent workers:  -p1="+r1.max+"   -p4="+r4.max);
-  log("wall time:                -p1="+(r1.ms/1000).toFixed(1)+"s   -p4="+(r4.ms/1000).toFixed(1)+"s");
-  if(r4.max>r1.max){ log("PARALLEL-RESULT: OVERLAPS ("+(r1.ms/r4.ms).toFixed(2)+"x speedup at -p4)"); }
-  else { log("PARALLEL-RESULT: SERIAL — -p4 did not overlap (peak stayed "+r4.max+")"); }
+  const base=results.find(r=>r.label==="1")||results[0];
+  for(const r of results){
+    log("  "+r.label.padEnd(4)+" "+(r.ms/1000).toFixed(1).padStart(7)+"s  peak="+r.max+
+        "  speedup-vs-p1="+(base?(base.ms/r.ms).toFixed(2):"?")+"x");
+  }
+  const hashes=new Set(results.filter(r=>r.bytes).map(r=>r.hash));
+  log("outputs identical across runs: "+(hashes.size===1?"yes":"NO ("+hashes.size+" distinct)"));
+  const def=results.find(r=>r.label==="def");
+  if(def) log("PARALLEL-RESULT: default -p reached peak "+def.max+" concurrent workers");
+  window.RESULT=results;
+  window.DONE=true;
   log("== done ==");
 })();
 </script>

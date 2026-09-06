@@ -87,6 +87,14 @@ handful of js/wasm standard-library files with versions that call into bottle:
   one 8 KB window and throws past it; the response file keeps the exec'd argv
   tiny. This is the stock long-args mechanism, tuned to the wasm ceiling — no
   wasm_exec patch, no linker change.
+- **`buildp_js.go`** — the one *added* file rather than a replacement: cmd/go
+  takes its default `-p` from `runtime.GOMAXPROCS(0)`, which is 1 on js/wasm,
+  so every in-tab build was serial even though `syscall_js.go` now runs
+  compile/link/asm/vet in Workers. This gives the `cfg` package an `init` that
+  sizes `-p` from `navigator.hardwareConcurrency` instead — and leaves it at 1
+  when the page is not cross-origin isolated, because then there are no Workers
+  to overlap. `-overlay` will materialize a path that does not exist upstream,
+  which is why this is a new file and not a fork of the 700-line `cfg.go`.
 
 `stdsrc.sh` harvests the standard-library source into `stdsrc.json`, keyed by
 path under the tab's `/goroot`, plus the assembler's `pkg/include` headers.
@@ -154,7 +162,8 @@ the same shape as everything already here, not a wall.
     stdsrc.sh          harvest the std source closure (called by build.sh)
     harvest.sh         prebuilt std archives for index.html (called by build.sh)
     serve/main.go      static server + the /goproxy module-proxy passthrough
-    overlay/           the GOROOT overlay — 6 std files + generated overlay.json
+    overlay/           the GOROOT overlay — 6 replaced files, 1 added file,
+                       plus the generated overlay.json
     jsfs.js, proc.js   vendored from github.com/0magnet/bottle
     wasm_exec.js       copied from the stock Go install
     hello/main.go      the default program for index.html
@@ -165,6 +174,7 @@ the same shape as everything already here, not a wall.
     probe-gonet.html   `go build` of a module fetched over /goproxy
     probe-websh.html   `go install` of github.com/0magnet/websh in the tab
     probe-go.html      a minimal check that cmd/go boots (version / env)
+    probe-parallel.html does the default -p overlap the Worker compiles?
     PROC-DESIGN.md     the process layer's design notes
 
 Built artifacts (`*.wasm`, `pkg/`, `stdsrc.json`, the importcfgs,
@@ -173,7 +183,7 @@ Built artifacts (`*.wasm`, `pkg/`, `stdsrc.json`, the importcfgs,
 ## Dependency Graph
 
 There is not one to draw. shipwright has no root module: its Go is six
-`overlay/` files that replace GOROOT sources at build time, plus two
+`overlay/` files applied to GOROOT sources at build time, plus two
 self-contained test modules (`hello`, stdlib only; `netdemo`, which pulls
 `github.com/pkg/errors` to prove a module can be fetched and built). The
 JavaScript is plain `<script>` includes with no imports. A dependency

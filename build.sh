@@ -6,7 +6,8 @@
 #                  for the compile→link→run demo (index.html).
 #   *-proc.wasm  — the same tools built with -overlay overlay/overlay.json,
 #                  which teaches the js/wasm runtime to spawn processes, pipe
-#                  their stdio, run a real GOROOT and take a no-op file lock.
+#                  their stdio, run a real GOROOT, take a no-op file lock and
+#                  size the build parallelism the tab can actually use.
 #                  With those, the *real cmd/go* runs `go build` in the tab
 #                  (probe-gobuild.html).
 #
@@ -35,7 +36,8 @@ cat > overlay/overlay.json <<EOF
     "$GOROOT/src/os/pipe_wasm.go": "$here/pipe_wasm.go",
     "$GOROOT/src/cmd/go/internal/lockedfile/internal/filelock/filelock_other.go": "$here/filelock_other.go",
     "$GOROOT/src/os/exec/lp_wasm.go": "$here/lp_wasm.go",
-    "$GOROOT/src/cmd/internal/sys/args.go": "$here/args.go"
+    "$GOROOT/src/cmd/internal/sys/args.go": "$here/args.go",
+    "$GOROOT/src/cmd/go/internal/cfg/buildp_js.go": "$here/buildp_js.go"
   }
 }
 EOF
