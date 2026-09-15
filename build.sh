@@ -64,7 +64,9 @@ echo "shipwright: ready — go run ./serve/main.go and open http://127.0.0.1:893
 echo "  index.html         compile → link → run a program in the tab"
 echo "  probe-gobuild.html the real cmd/go running 'go build' in the tab"
 echo "  probe-gonet.html   'go build' of a module fetched over /goproxy"
-# jsfs.js, fsbridge.js and proc.js are vendored from github.com/0magnet/bottle;
-# refresh with:
+# jsfs.js, fsbridge.js, proc.js and coi-sw.js are vendored from
+# github.com/0magnet/bottle — the same files shipyard clones at build time.
+# They are copies here because this repo has no build-time network step; that
+# makes them go stale silently, so refresh them whenever a probe misbehaves:
 #   git clone git@github.com:0magnet/bottle.git && \
-#     cp bottle/jsfs.js bottle/fsbridge.js bottle/proc.js .
+#     cp bottle/jsfs.js bottle/fsbridge.js bottle/proc.js bottle/coi-sw.js .
