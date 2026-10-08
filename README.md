@@ -4,7 +4,7 @@ Ships in a [bottle](https://github.com/0magnet/bottle) need someone to
 build them. shipwright is that someone: the Go compiler, building Go
 programs, inside the browser tab they will run in.
 
-**[Live demo](https://0magnet.github.io/shipwright/)** — edit the program and press *build & run*; `cmd/compile` and `cmd/link` do the work in the tab, and nothing after page load touches the server.
+**[Live demo](https://shipwright.magnetosphere.net/)** — edit the program and press *build & run*; `cmd/compile` and `cmd/link` do the work in the tab, and nothing after page load touches the server.
 
 ![shipwright in the browser](docs/shipwright-demo.png "a Go program compiled, linked and executed inside the tab, with the compile and link timings")
 
@@ -21,7 +21,7 @@ again.
       over one shared in-memory disk, and writes a 2.5 MB a.wasm
 
 **Live:** the offline demos run in your browser at
-<https://0magnet.github.io/shipwright/> (published by `.github/workflows/pages.yml`).
+<https://shipwright.magnetosphere.net/> (published by `.github/workflows/pages.yml`).
 The network demo needs a server for its `/goproxy` passthrough, so run that one
 locally.
 
@@ -43,7 +43,13 @@ Headless proof (each marker line is a pass signal):
       --enable-logging=stderr http://127.0.0.1:8931/probe-gonet.html \
       2>&1 | grep SHIPWRIGHT-NET-MARKER
 
-## Three demos
+## The demos
+
+There are six pages: `index.html` and five probes. The three below are the ones
+to read; the others are `probe-websh.html` (`go install` of
+`github.com/0magnet/websh` in the tab), `probe-go.html` (a minimal check that
+cmd/go boots) and `probe-parallel.html` (does the default `-p` overlap the
+Worker compiles).
 
 - **`index.html`** — the minimal shape: one `compile.wasm`, one `link.wasm`,
   a fixed set of prebuilt std archives. Source → `main.a` → `a.wasm` → runs.
@@ -165,6 +171,9 @@ the same shape as everything already here, not a wall.
     overlay/           the GOROOT overlay — 6 replaced files, 1 added file,
                        plus the generated overlay.json
     jsfs.js, proc.js   vendored from github.com/0magnet/bottle
+    fsbridge.js        jsfs, callable synchronously from a Worker (SharedArrayBuffer)
+    coi-sw.js          service worker that adds the COOP/COEP headers Pages cannot,
+                       so the page is cross-origin isolated after one reload
     wasm_exec.js       copied from the stock Go install
     hello/main.go      the default program for index.html
     netdemo/main.go    a program with an external dep, for probe-gonet.html
@@ -210,12 +219,16 @@ gocloc --not-match-d='(vendor|node_modules|\.git)' .
 -------------------------------------------------------------------------------
 Language                     files          blank        comment           code
 -------------------------------------------------------------------------------
-JavaScript                       4            129            207           1237
-Go                               9            182            141           1069
-HTML                             5             16             16            231
-Markdown                         2             39              0            194
-Bourne Shell                     3             11             53            117
+JavaScript                       6            206            494           1891
+Go                              10            191            262           1120
+HTML                             6             25             74            406
+Markdown                         2             49              0            247
+Bourne Shell                     3             11             58            118
+YAML                             1              0              7             98
+JSON                             3              0              0             70
+Plain Text                       2              1              0             61
+XML                              1              0              0              4
 -------------------------------------------------------------------------------
-TOTAL                           23            377            417           2848
+TOTAL                           34            483            895           4015
 -------------------------------------------------------------------------------
 ```
