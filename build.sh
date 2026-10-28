@@ -60,6 +60,9 @@ GOOS=js GOARCH=wasm go build -overlay overlay/overlay.json -o vet-proc.wasm     
 ./harvest.sh
 ( echo '{"files":['; find pkg -name '*.a' | sort | sed 's/.*/"&",/' | sed '$ s/,$//'; echo ']}' ) > manifest.json
 
+# The stamp update.js watches (index.html; a copy of bottle's): a hash of
+# what was built, so the open page hears of a new build when a binary changes.
+cat *.wasm *.js | sha256sum | cut -c1-16 > version.txt
 echo "shipwright: ready — go run ./serve/main.go and open http://127.0.0.1:8931/"
 echo "  index.html         compile → link → run a program in the tab"
 echo "  probe-gobuild.html the real cmd/go running 'go build' in the tab"

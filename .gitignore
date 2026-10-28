@@ -12,3 +12,4 @@ importcfg.link
 stdsrc.json
 .stdsrc.list
 overlay/overlay.json
+version.txt
